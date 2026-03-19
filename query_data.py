@@ -34,42 +34,64 @@ def main():
         print("✅ Risk Model loaded.")
         
         print("➡️  Loading full loan dataset for lookups...")
-        loan_df = pd.read_csv("dataset/loan.csv", low_memory=False)
+        required_cols = ['id', 'loan_amnt', 'annual_inc', 'dti', 'fico_range_low']
+        loan_df = pd.read_csv("dataset/loan.csv", usecols=required_cols)
         print("✅ Full dataset loaded.")
         
     except FileNotFoundError:
         print("🔴 ERROR: Could not find 'risk_model.joblib' or 'dataset/loan.csv'.")
         print("Please make sure you have run the training script and the data is in place.")
         return
-    # --- END OF NEW SECTION ---
-
+# --- RAG LOAD ---
     print("➡️  Loading RAG system...")
     embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vector_db = FAISS.load_local("faiss_index", embedding_model, allow_dangerous_deserialization=True)
     retriever = vector_db.as_retriever()
     print("✅ RAG system loaded.")
     
-    available_ids = list_available_docs()
-    if available_ids:
-        print("\n✅ System ready. I have knowledge of the following applications:")
-        print(f"   {', '.join(available_ids)}")
+    print("\n✅ System ready.")
     
     print("\n   Type a question (e.g., 'What is the loan status for 68407277?')")
     print("   OR 'assess risk for [ID]'")
     print("   OR 'exit' to quit.")
 
-    # --- RAG Chain definition ---
     template = """
-    Use the following pieces of retrieved context to answer the question.
-    If you don't know the answer, just say that you don't know.
-    Keep the answer concise.
+Use the following context to answer the user's question precisely.
 
-    Context: {context}
-    Question: {question}
-    Answer:
-    """
+Context:
+{context}
+
+Question: {question}
+
+INSTRUCTIONS:
+1. Analyze the user's question to identify the data field they are asking about (e.g., "FICO score", "loan amount").
+2. Scan the context to find all values for that specific data field.
+3. Perform the requested comparison (e.g., find the lowest or highest value).
+4. State the answer in a clear, simple sentence using the exact format from the examples below.
+
+---
+EXAMPLE 1:
+Question: What is the lowest FICO score?
+Answer: The lowest FICO score is 660.0.
+
+EXAMPLE 2:
+Question: What is the application id with the lowest loan amount?
+Answer: The application with the lowest loan amount is 68534381.
+
+EXAMPLE 3:
+Question: What is the application id with the highest loan amount?
+Answer: Application ID: 68535544 with a loan amount of $23,525.00.
+---
+
+Now, based on the context, answer the user's question.
+
+Answer:
+"""
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGroq(model_name="llama3-8b-8192")
+    
+    model_to_use = os.environ.get("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
+    llm = ChatGroq(model_name=model_to_use)
+    
     rag_chain = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | prompt
@@ -85,17 +107,14 @@ def main():
         # --- Logic to switch between RAG and Risk Assessment ---
         if question.lower().startswith("assess risk for"):
             try:
-                # Extract the ID from the command
                 app_id = int(question.split()[-1])
                 
-                # Find the applicant's data in the dataframe
                 applicant_data = loan_df[loan_df['id'] == app_id]
                 
                 if applicant_data.empty:
                     print("\nAnswer: Applicant ID not found in the dataset.")
                     continue
                 
-                # Select the features our model needs
                 features = ['loan_amnt', 'annual_inc', 'dti', 'fico_range_low']
                 applicant_features = applicant_data[features].dropna()
 
@@ -103,11 +122,9 @@ def main():
                     print("\nAnswer: Applicant data is missing key features for assessment.")
                     continue
 
-                # Get the prediction and probability
                 prediction = risk_model.predict(applicant_features)[0]
                 probability = risk_model.predict_proba(applicant_features)[0]
                 
-                # Print the report
                 print("\n--- Risk Assessment Report ---")
                 print(f"Applicant ID: {app_id}")
                 if prediction == 0:
@@ -122,9 +139,9 @@ def main():
                 print("\nInvalid command. Please use the format: assess risk for [ID]")
         else:
             # If not an assess command, use the RAG chain
+            # The line printing the model name has been removed from here
             answer = rag_chain.invoke(question)
             print("\nAnswer:", answer)
-        # --- END OF NEW LOGIC ---
 
 if __name__ == "__main__":
     main()
